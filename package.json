@@ -1,8 +1,8 @@
 {
   "name": "claude-debugs-for-you",
-  "displayName": "Claude Debugs for You",
-  "description": "Enable an MCP Client, such as Claude Desktop to directly debug code with breakpoints",
-  "version": "0.1.2",
+  "displayName": "Claude Debugs for You - Unity Edition",
+  "description": "Unity-specialized MCP debugger enabling autonomous debugging with state tracking and validation",
+  "version": "0.2.0",
   "repository": "https://github.com/jasonjmcghee/claude-debugs-for-you",
   "author": "Jason McGhee",
   "publisher": "JasonMcGhee",
@@ -75,7 +75,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "cd mcp && npm run build && cd - && tsc -p ./",
+    "compile": "cd mcp && npm run build && cd .. && tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",

@@ -3,6 +3,7 @@ import * as http from 'http';
 import * as vscode from 'vscode';
 import { EventEmitter } from 'events';
 import { z } from 'zod';
+import { UnityDebugStateManager } from './unity-debug-state';
 
 interface DebugServerEvents {
     on(event: 'started', listener: () => void): this;
@@ -19,11 +20,12 @@ export interface DebugCommand {
 }
 
 export interface DebugStep {
-    type: 'setBreakpoint' | 'removeBreakpoint' | 'continue' | 'evaluate' | 'launch';
+    type: 'setBreakpoint' | 'removeBreakpoint' | 'continue' | 'evaluate' | 'launch' | 'getState';
     file: string;
     line?: number;
     expression?: string;
     condition?: string;
+    threadId?: number;
 }
 
 interface ToolRequest {
@@ -54,11 +56,12 @@ const getFileContentInputSchema = {
 };
 
 const debugStepSchema = z.object({
-    type: z.enum(["setBreakpoint", "removeBreakpoint", "continue", "evaluate", "launch"]).describe(""),
+    type: z.enum(["setBreakpoint", "removeBreakpoint", "continue", "evaluate", "launch", "getState"]).describe(""),
     file: z.string(),
     line: z.number().optional(),
     expression: z.string().describe("An expression to be evaluated in the stack frame of the current breakpoint").optional(),
     condition: z.string().describe("If needed, a breakpoint condition may be specified to only stop on a breakpoint for some given condition.").optional(),
+    threadId: z.number().describe("Optional thread ID to use for the operation. If not specified, the active thread will be used.").optional(),
 });
 
 const debugInputSchema = {
@@ -90,11 +93,13 @@ export class DebugServer extends EventEmitter implements DebugServerEvents {
     private activeTransports: Record<string, SSEServerTransport> = {};
     private mcpServer: McpServer;
     private _isRunning: boolean = false;
+    private unityState: UnityDebugStateManager;
 
     constructor(port?: number, portConfigPath?: string) {
         super();
         this.port = port || 4711;
         this.portConfigPath = portConfigPath || null;
+        this.unityState = new UnityDebugStateManager();
         this.mcpServer = new McpServer({
             name: "Debug Server",
             version: "1.0.0",
@@ -466,13 +471,31 @@ export class DebugServer extends EventEmitter implements DebugServerEvents {
                         throw new Error('No active debug session');
                     }
 
-                    // Get the current thread ID (required by DAP spec)
-                    const threads = await session.customRequest('threads');
-                    const threadId = threads.threads[0].id;
+                    try {
+                        // Get thread ID from state manager (auto-inject if not provided)
+                        let threadId: number;
+                        if (step.threadId !== undefined) {
+                            threadId = step.threadId;
+                        } else if (this.unityState.getActiveThreadId()) {
+                            threadId = this.unityState.getActiveThreadId()!;
+                        } else {
+                            // Fallback: get first available thread
+                            const threads = await session.customRequest('threads');
+                            threadId = threads.threads[0].id;
+                        }
 
-                    // Continue with the thread ID
-                    await session.customRequest('continue', { threadId });
-                    results.push('Continued execution');
+                        // Continue with the thread ID
+                        await session.customRequest('continue', { threadId });
+
+                        // Update state - we're no longer paused
+                        this.unityState.handleContinued();
+
+                        results.push(`Continued execution (thread ${threadId})`);
+                    } catch (err: any) {
+                        const errorMsg = `Failed to continue: ${err.message || err}`;
+                        console.error('[Unity Debug]', errorMsg);
+                        results.push(`ERROR: ${errorMsg}`);
+                    }
                     break;
                 }
 
@@ -482,30 +505,34 @@ export class DebugServer extends EventEmitter implements DebugServerEvents {
                         throw new Error('No active debug session');
                     }
 
-                    const activeStackItem = vscode.debug.activeStackItem;
+                    try {
+                        // Validate state before attempting evaluation
+                        this.unityState.validateCanEvaluate();
 
-                    // Grab the active frameId
-                    let frameId = undefined;
-                    if (activeStackItem instanceof vscode.DebugStackFrame) {
-                        frameId = activeStackItem.frameId;
-                    }
+                        const activeStackItem = vscode.debug.activeStackItem;
 
-                    // In case activeStackItem.frameId is falsey
-                    if (!frameId) {
-                        // Get the current stack frame
-                        const frames = await session.customRequest('stackTrace', {
-                            threadId: 1  // You might need to get the actual threadId
-                        });
-
-                        if (!frames || !frames.stackFrames || frames.stackFrames.length === 0) {
-                            vscode.window.showErrorMessage('No stack frame available');
-                            break;
+                        // Grab the active frameId
+                        let frameId = undefined;
+                        if (activeStackItem instanceof vscode.DebugStackFrame) {
+                            frameId = activeStackItem.frameId;
                         }
 
-                        frameId = frames.stackFrames[0].id;  // Usually use the top frame
-                    }
+                        // In case activeStackItem.frameId is falsey
+                        if (!frameId) {
+                            // Get thread ID from state manager (with auto-inject)
+                            const threadId = this.unityState.getThreadIdForOperation(step.threadId);
 
-                    try {
+                            // Get the current stack frame using the correct thread ID
+                            const frames = await session.customRequest('stackTrace', { threadId });
+
+                            if (!frames || !frames.stackFrames || frames.stackFrames.length === 0) {
+                                results.push('ERROR: No stack frame available for evaluation');
+                                break;
+                            }
+
+                            frameId = frames.stackFrames[0].id;  // Usually use the top frame
+                        }
+
                         const response = await session.customRequest('evaluate', {
                             expression: step.expression,
                             frameId: frameId,
@@ -515,23 +542,29 @@ export class DebugServer extends EventEmitter implements DebugServerEvents {
                         results.push(`Evaluated "${step.expression}": ${response.result}`);
                     } catch (err: any) {
                         let errorMessage = '';
-                        let stackTrace = '';
 
                         if (err instanceof Error) {
                             errorMessage = err.message;
-                            if (err.stack) {
-                                stackTrace = `\nStack: ${err.stack}`;
-                            }
                         } else {
                             errorMessage = String(err);
                         }
-                        results.push(`ERROR: Evaluation failed for "${step.expression}": ${errorMessage}${stackTrace}`);
+
+                        results.push(`ERROR: Evaluation failed for "${step.expression}": ${errorMessage}`);
+                        console.error('[Unity Debug] Evaluation error:', err);
                     }
+                    break;
+                }
+
+                case 'getState': {
+                    const state = this.unityState.getState();
+                    const stateJson = JSON.stringify(state, null, 2);
+                    results.push(`Current debug state:\n${stateJson}`);
                     break;
                 }
 
                 case 'launch': {
                     await this.handleLaunch({ program: step.file });
+                    break;
                 }
             }
         }

@@ -134,7 +134,7 @@ const debugStepSchema = {
         properties: {
             type: {
                 type: "string",
-                enum: ["setBreakpoint", "removeBreakpoint", "continue", "evaluate", "launch"],
+                enum: ["setBreakpoint", "removeBreakpoint", "continue", "evaluate", "launch", "getState"],
                 description: ""
             },
             file: { type: "string" },
@@ -146,6 +146,10 @@ const debugStepSchema = {
             condition: {
                 description: "If needed, a breakpoint condition may be specified to only stop on a breakpoint for some given condition.",
                 type: "string"
+            },
+            threadId: {
+                description: "Optional thread ID to use for the operation. If not specified, the active thread will be used.",
+                type: "number"
             },
         },
         required: ["type", "file"]
