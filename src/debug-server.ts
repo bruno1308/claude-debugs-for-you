@@ -337,30 +337,34 @@ export class DebugServer extends EventEmitter implements DebugServerEvents {
         }
 
         // Check if we're at a breakpoint
-        try {
-            const threads = await session.customRequest('threads');
-            const threadId = threads.threads[0].id;
+        // Skip this check for Unity debuggers (vstuc) as they need more time to initialize
+        if (session.type !== 'vstuc') {
+            try {
+                const threads = await session.customRequest('threads');
+                const threadId = threads.threads[0].id;
 
-            const stack = await session.customRequest('stackTrace', { threadId });
-            if (stack.stackFrames && stack.stackFrames.length > 0) {
-                const topFrame = stack.stackFrames[0];
-                const currentBreakpoints = vscode.debug.breakpoints.filter(bp => {
-                    if (bp instanceof vscode.SourceBreakpoint) {
-                        return bp.location.uri.toString() === topFrame.source.path &&
-                            bp.location.range.start.line === (topFrame.line - 1);
+                const stack = await session.customRequest('stackTrace', { threadId });
+                if (stack.stackFrames && stack.stackFrames.length > 0) {
+                    const topFrame = stack.stackFrames[0];
+                    const currentBreakpoints = vscode.debug.breakpoints.filter(bp => {
+                        if (bp instanceof vscode.SourceBreakpoint) {
+                            return bp.location.uri.toString() === topFrame.source.path &&
+                                bp.location.range.start.line === (topFrame.line - 1);
+                        }
+                        return false;
+                    });
+
+                    if (currentBreakpoints.length > 0) {
+                        return `Debug session started - Stopped at breakpoint on line ${topFrame.line}`;
                     }
-                    return false;
-                });
-
-                if (currentBreakpoints.length > 0) {
-                    return `Debug session started - Stopped at breakpoint on line ${topFrame.line}`;
                 }
+                return 'Debug session started';
+            } catch (err) {
+                console.error('Error checking breakpoint status:', err);
+                return 'Debug session started';
             }
-            return 'Debug session started';
-        } catch (err) {
-            console.error('Error checking breakpoint status:', err);
-            return 'Debug session started';
         }
+        return 'Debug session started';
     }
 
     private waitForDebugSession(): Promise<vscode.DebugSession> {
